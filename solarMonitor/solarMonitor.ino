@@ -1,5 +1,6 @@
 /*
  * Quick and dirty code, will make nice when PCB is done
+ * NOTE: for pin 10 to work you need to remove the ptt pin code in RH_ASK.cpp
  */
 
 #include <SPI.h>
@@ -7,10 +8,9 @@
 #include <Adafruit_PCD8544.h>
 #include <Wire.h>
 #include <Adafruit_INA219.h>
-#include <RH_ASK.h>
+#include <RH_ASK.h> // NOTE: for pin 10 to work you need to remove the ptt pin code in RH_ASK.cpp
 
 // PINS
-#define LED_STATUS          13
 #define N_POWER_DOWN_OPAMP  2
 #define DISPLAY_SCLK        3
 #define DISPLAY_DIN         4
@@ -20,8 +20,15 @@
 #define ANALOG_BAT_V        A0
 #define ANALOG_SOLAR_A      A2
 #define ANALOG_SOLAR_V      A3
+#define MOSFET_VBAT         10
 
 #define FLOAT_DECIMALS      3
+
+#define INA219_A_CORRECTION 0.15
+
+// Discharge threshold in V
+#define DISCHARGE_TRESHOLD_TOP    3.9
+#define DISCHARGE_TRESHOLD_BOTTOM 3.5
 
 Adafruit_INA219 ina219;
 
@@ -46,6 +53,8 @@ struct sensorStruct{
 
 byte buf[sizeof(SensorReadings)] = {0};
 
+bool allow_discharge = false;
+
 void setupDisplay()
 {
   display.begin();
@@ -63,15 +72,13 @@ void setupDisplay()
 
 void setupPins()
 {
-  pinMode(LED_STATUS, OUTPUT);
-  digitalWrite(LED_STATUS, HIGH); // Start off
-
-  pinMode(2, OUTPUT);
-  digitalWrite(13, HIGH);         // Start on  
+  pinMode(MOSFET_VBAT, OUTPUT);
+  digitalWrite(MOSFET_VBAT, LOW); // Start off
 }
 
 void setup()
 {
+  setupPins();
   setupDisplay();
   ina219.begin();
 
@@ -159,7 +166,7 @@ void loop()
   for(int i = 0; i < loops; i++)
   {
     float Vcc = readVcc();
-    float solarCurrent = ina219.getCurrent_mA();
+    float solarCurrent = ina219.getCurrent_mA() + INA219_A_CORRECTION;
     float solarVoltage = ina219.getBusVoltage_V();
     float batteryVoltage = readVoltage(ANALOG_BAT_V);
   
@@ -171,6 +178,22 @@ void loop()
     
     updateDisplay(Vcc, solarCurrent, solarVoltage, batteryVoltage);
     delay(100);
+  }
+
+  // Enable discharge mode when above certain treshold
+  if (vBatMean/loops > DISCHARGE_TRESHOLD_TOP)
+  {
+    allow_discharge = true;
+  }
+  // Enable mosfet
+  if (allow_discharge && vBatMean/loops > DISCHARGE_TRESHOLD_BOTTOM)
+  {
+    digitalWrite(MOSFET_VBAT, HIGH);
+  }
+  else // When almost empty, disable discharge mode
+  {
+    allow_discharge = false;
+    digitalWrite(MOSFET_VBAT, LOW);
   }
 
   SensorReadings.vBat = vBatMean/loops;
