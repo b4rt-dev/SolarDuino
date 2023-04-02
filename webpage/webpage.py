@@ -1,10 +1,12 @@
 # Very bad and messy code.
+# Will rewrite this when PCB arrives
 # Note: use /?embed=true to hide the status bar
 
 import time 
 
 import numpy as np 
 import pandas as pd
+from pandas.tseries.offsets import MonthEnd
 from scipy import integrate
 import altair as alt
 import streamlit as st
@@ -112,54 +114,6 @@ def get_today_data() -> pd.DataFrame:
     return df
 
 
-def get_energy_per_period(df, freq, days, column):
-    # Group per period
-    df_by_period = df.groupby(pd.PeriodIndex(df.index, freq=freq))
-
-    # Calculate mean per period of selected column
-    period_power_mean = df_by_period[column].mean()
-
-    # Divide by number of days * 24 to get energy per hour
-    period_energy = period_power_mean / (days*24)
-
-    # Convert to dataframe and fix index
-    period_energy = period_energy.to_frame()
-    period_energy.index = period_energy.index.to_timestamp()
-    return period_energy
-
-
-def get_max_per_period(df, freq, column):
-    # Group per period
-    df_by_period = df.groupby(pd.PeriodIndex(df.index, freq=freq))
-
-    # Calculate max per period of selected column
-    period_max = df_by_period[column].max()
-
-    # Convert to dataframe and fix index
-    period_max = period_max.to_frame()
-    period_max.index = period_max.index.to_timestamp()
-    return period_max
-
-
-def print_daily_stats(df):
-    daily_pv_max = get_max_per_period(df, "d", "PV Power")
-    daily_pv_energy = get_energy_per_period(df, "d", 1, "PV Power")
-
-    st.markdown("### Daily PV max Power")
-    fig = px.bar(
-        data_frame=daily_pv_max,
-        y="PV Power",
-    ).update_layout(yaxis_title="W")
-    st.write(fig)
-
-    st.markdown("### Daily PV Energy")
-    fig = px.bar(
-        data_frame=daily_pv_energy,
-        y="PV Power",
-    ).update_layout(yaxis_title="Wh")
-    st.write(fig)
-
-
 def print_day_graphs(df, selected_day):
     """
     Only show between dusk and dawn of selected day.
@@ -175,7 +129,7 @@ def print_day_graphs(df, selected_day):
             (df.index <= dusk)
         ].resample("30s").mean()
 
-    # Somehow the select, resample and mean can generate Nan rows
+    # Somehow resample and mean can generate Nan rows
     #  so drop rows with nan
     df_selected_day.dropna(inplace=True)
 
@@ -306,7 +260,188 @@ def print_day_graphs(df, selected_day):
         st.altair_chart(fig, theme="streamlit", use_container_width=True)
 
 
-    
+@st.cache_data
+def get_metrics_per_day(df):
+    grouped_by_day = df.groupby(df.index.date)
+
+    # Build df as dictionary and convert later
+    df_by_day = {
+        "Date": [],
+        "PV Energy": [],
+        "PV Max Power": [],
+        }
+
+    for day, df_day in grouped_by_day:
+        # Resample to get more speed for energy calculations(but less accuracy)
+        df_day_resampled = df_day.resample("30s").mean()
+        # Somehow resample and mean can generate Nan rows
+        #  so drop rows with nan
+        df_day_resampled.dropna(inplace=True)
+
+        # Get PV energy
+        pv_energy_day = np.trapz(df_day_resampled["PV Power"], df_day_resampled.index).total_seconds() / 3600
+        
+        # Get PV max power
+        pv_max_power = df_day["PV Power"].max()
+
+        # Fill df_by_day
+        df_by_day["Date"].append(day)
+        df_by_day["PV Energy"].append(pv_energy_day)
+        df_by_day["PV Max Power"].append(pv_max_power)
+
+    # Actually convert to dataframe
+    df_by_day = pd.DataFrame.from_dict(df_by_day)
+    df_by_day["Date"] = pd.to_datetime(df_by_day["Date"])
+    df_by_day.set_index("Date", inplace=True)
+
+    return df_by_day
+
+
+@st.cache_data
+def get_metrics_per_month(df):
+    grouped_by_month = df.groupby(pd.Grouper(freq='M'))
+
+    # Build df as dictionary and convert later
+    df_by_month = {
+        "Month": [],
+        "PV Energy": [],
+        "PV Max Power": [],
+        }
+
+    for month, df_month in grouped_by_month:
+        # Resample to get more speed for energy calculations(but less accuracy)
+        df_month_resampled = df_month.resample("30s").mean()
+        # Somehow resample and mean can generate Nan rows
+        #  so drop rows with nan
+        df_month_resampled.dropna(inplace=True)
+
+        # Get PV energy
+        pv_energy_month = np.trapz(df_month_resampled["PV Power"], df_month_resampled.index).total_seconds() / 3600
+        
+        # Get PV max power
+        pv_max_power = df_month["PV Power"].max()
+
+        # Fill df_by_month
+        df_by_month["Month"].append(month)
+        df_by_month["PV Energy"].append(pv_energy_month)
+        df_by_month["PV Max Power"].append(pv_max_power)
+
+    # Actually convert to dataframe
+    df_by_month = pd.DataFrame.from_dict(df_by_month)
+    df_by_month["Month"] = pd.to_datetime(df_by_month["Month"])
+    df_by_month.set_index("Month", inplace=True)
+
+    return df_by_month
+
+
+def print_week_graphs(df, selected_day):
+    """
+    Shows stats for week of selected day
+    """
+    st.markdown("## Week overview")
+
+    # Get week number
+    selected_week = selected_day.isocalendar()[1]
+
+    # Get data of selected week only
+    df_selected_week = df[(df.index.isocalendar().week == selected_week)]
+
+    # Get metrics for each day of the week
+    df_by_day = get_metrics_per_day(df_selected_week)
+
+    tab_energy, tab_power_max= st.tabs(["PV Energy", "PV Max Power"])
+
+    with tab_energy:
+        # Daily pv energy
+        fig = alt.Chart(df_by_day["PV Energy"].reset_index()).mark_bar().encode(
+            x=alt.X('monthdate(Date):O', axis=alt.Axis(title="")),
+            y=alt.Y('PV Energy:Q', axis=alt.Axis(title="", labelExpr='datum.value + " Wh"')),
+            color=alt.condition(
+                alt.datum.Date == alt.expr.toDate(str(selected_day)),
+                alt.value('orange'),
+                alt.value('steelblue')
+            ),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date", format='%b %d'),
+                alt.Tooltip("PV Energy:Q", title="Energy", format='.2f'),
+                ]
+        )
+
+        st.altair_chart(fig, theme="streamlit", use_container_width=True)
+
+    with tab_power_max:
+        # Daily pv max power
+        fig = alt.Chart(df_by_day["PV Max Power"].reset_index()).mark_bar().encode(
+            x=alt.X('monthdate(Date):O', axis=alt.Axis(title="")),
+            y=alt.Y('PV Max Power:Q', axis=alt.Axis(title="", labelExpr='datum.value + " W"')),
+            color=alt.condition(
+                alt.datum.Date == alt.expr.toDate(str(selected_day)),
+                alt.value('orange'),
+                alt.value('steelblue')
+            ),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date", format='%b %d'),
+                alt.Tooltip("PV Max Power:Q", title="Energy", format='.2f'),
+                ]
+        )
+
+        st.altair_chart(fig, theme="streamlit", use_container_width=True)
+
+
+def print_year_graphs(df, selected_day):
+    """
+    Shows stats for year of selected day by month
+    """
+    st.markdown("## Year overview")
+
+    # Get year of selected day
+    selected_year = selected_day.year
+
+    # Get data of selected year only
+    df_selected_year = df[(df.index.year == selected_year)]
+
+    # Get metrics for each month of the year
+    df_by_month = get_metrics_per_month(df_selected_year)
+
+    tab_energy, tab_power_max= st.tabs(["PV Energy", "PV Max Power"])
+
+    with tab_energy:
+        # Daily pv energy
+        fig = alt.Chart(df_by_month["PV Energy"].reset_index()).mark_bar().encode(
+            x=alt.X('yearmonth(Month):O', axis=alt.Axis(title="")),
+            y=alt.Y('PV Energy:Q', axis=alt.Axis(title="", labelExpr='datum.value + " Wh"')),
+            color=alt.condition(
+                # Set to last day of month, because that is the index returned by get_metrics_per_month
+                alt.datum.Month == alt.expr.toDate(str(selected_day.replace(day=1) + MonthEnd(0))),
+                alt.value('orange'),
+                alt.value('steelblue')
+            ),
+            tooltip=[
+                alt.Tooltip("Month:T", title="Month", format='%b %Y'),
+                alt.Tooltip("PV Energy:Q", title="Energy", format='.2f'),
+                ]
+        )
+
+        st.altair_chart(fig, theme="streamlit", use_container_width=True)
+
+    with tab_power_max:
+        # Daily pv max power
+        fig = alt.Chart(df_by_month["PV Max Power"].reset_index()).mark_bar().encode(
+            x=alt.X('yearmonth(Month):O', axis=alt.Axis(title="")),
+            y=alt.Y('PV Max Power:Q', axis=alt.Axis(title="", labelExpr='datum.value + " W"')),
+            color=alt.condition(
+                # Set to last day of month, because that is the index returned by get_metrics_per_month
+                alt.datum.Month == alt.expr.toDate(str(selected_day.replace(day=1) + MonthEnd(0))),
+                alt.value('orange'),
+                alt.value('steelblue')
+            ),
+            tooltip=[
+                alt.Tooltip("Month:T", title="Month", format='%b %Y'),
+                alt.Tooltip("PV Max Power:Q", title="Energy", format='.2f'),
+                ]
+        )
+
+        st.altair_chart(fig, theme="streamlit", use_container_width=True)
 
 
 def start_live_view_loop(live_view):
@@ -456,11 +591,6 @@ def start_live_view_loop(live_view):
 def display_title():
     st.markdown("# SolarDuino Dashboard")
 
-def print_week_graphs(df, selected_day):
-    # TODO: Get data of selected week
-    df_selected_week = df
-
-    print_daily_stats(df_selected_week)
 
 def main():
     display_title()
@@ -468,6 +598,7 @@ def main():
     selected_day = st.date_input("Selected day")
 
     # Set selected day to yesterday if today is selected and not yet dawn
+    dawn, _ = get_dawn_dusk(get_location(), selected_day)
     current_datetime = datetime.now()
     if current_datetime.date == selected_day:
         if current_datetime.time < dawn.time:
@@ -477,7 +608,8 @@ def main():
     df = get_data()
 
     print_day_graphs(df, selected_day)
-    #print_week_graphs(df, selected_day)
+    print_week_graphs(df, selected_day)
+    print_year_graphs(df, selected_day)
 
     # Live view placeholder
     st.write("## Live view")
