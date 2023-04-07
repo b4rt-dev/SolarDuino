@@ -114,6 +114,7 @@ def get_today_data() -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=LIVE_VIEW_INTERVAL)
 def print_day_graphs(df, selected_day):
     """
     Only show between dusk and dawn of selected day.
@@ -147,7 +148,7 @@ def print_day_graphs(df, selected_day):
         fig = alt.Chart(df_selected_day.reset_index()).transform_fold(
             ["PV Voltage", "Battery Voltage", "LDO Voltage"],
         ).mark_line().encode(
-            x=alt.X('Date:T', axis=alt.Axis(format='%H:%M:%S', title='')),
+            x=alt.X('Date:T', axis=alt.Axis(format='%b %d %H:%M', title='')),
             y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " V"')),
             color=alt.Color('key:N',
                 scale=alt.Scale(domain=["PV Voltage", "Battery Voltage", "LDO Voltage"]),
@@ -234,13 +235,17 @@ def print_day_graphs(df, selected_day):
         df_selected_day["PV Energy"] = df_selected_day["PV Energy"].apply(lambda row : row.total_seconds() if not isinstance(row, int) else 0.0)
         df_selected_day["PV Energy"] = df_selected_day["PV Energy"] / 3600
 
+        df_selected_day["Output Energy"] = (integrate.cumtrapz(df_selected_day["Output Power"], df_selected_day.index, initial=0))
+        df_selected_day["Output Energy"] = df_selected_day["Output Energy"].apply(lambda row : row.total_seconds() if not isinstance(row, int) else 0.0)
+        df_selected_day["Output Energy"] = df_selected_day["Output Energy"] / 3600
+
         fig = alt.Chart(df_selected_day.reset_index()).transform_fold(
-            ["PV Energy"],
+            ["PV Energy", "Output Energy"],
         ).mark_line().encode(
             x=alt.X('Date:T', axis=alt.Axis(format='%b %d %H:%M', title='')),
             y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " Wh"')),
             color=alt.Color('key:N',
-                scale=alt.Scale(domain=["PV Energy"]),
+                scale=alt.Scale(domain=["PV Energy", "Output Energy"]),
                 legend=alt.Legend(
                             title="",
                             orient="top",
