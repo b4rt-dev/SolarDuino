@@ -11,6 +11,7 @@
 // INCLUDES
 //*****************
 
+#include <FastLED.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_PCD8544.h>
@@ -47,6 +48,15 @@
 #define PIN_SDA             A4
 #define PIN_SCL             A5
 
+// FASTLED
+#define DATA_PIN    1 // TX
+#define LED_TYPE    WS2812B
+#define COLOR_ORDER GRB
+#define NUM_LEDS    41
+
+// DYNAMIC LOAD
+#define TARGET_VOLTAGE 4.2
+#define MIN_BRIGHNESS 25
 
 // DISPLAY CONFIG
 #define FLOAT_DECIMALS      3
@@ -82,6 +92,13 @@ Adafruit_PCD8544 display = Adafruit_PCD8544(
 // 433MHz Transmitter
 RH_ASK rf_driver;
 
+// FastLED ledstrip
+CRGB leds[NUM_LEDS];
+
+// Dynamic load
+long powerValue = 300;
+int ledBrightness =  MIN_BRIGHNESS;
+long currentStabilizerLoadValue = 0;
 
 // Data structure for sensor readings to transmit
 struct sensorStruct{
@@ -106,16 +123,156 @@ bool treshold_5v_reached = false;
 float treshold_3v3_on = 3.6;
 float treshold_3v3_off = 3.4;
 
-float treshold_vbat_on = 3.8;
-float treshold_vbat_off = 3.6;
+float treshold_vbat_on = 4.0;
+float treshold_vbat_off = 3.9;
 
-float treshold_5v_on = 4.0;
-float treshold_5v_off = 3.65;
+float treshold_5v_on = 4.9;
+float treshold_5v_off = 4.8;
 
 
 //*****************
 // FUNCTIONS
 //*****************
+
+void setLeds()
+{
+  long powerValueCopy = powerValue;
+  int led_i = 0;
+
+  while (powerValueCopy >= 0 && led_i < 41)
+  {
+    if (powerValueCopy > 255)
+    {
+      leds[led_i].setRGB(255, 255, 255);
+      powerValueCopy -= 255;
+    }
+    else
+    {
+      leds[led_i].setRGB(powerValueCopy, powerValueCopy, powerValueCopy);
+      powerValueCopy = 0;
+    }
+    led_i++;
+  }
+
+  FastLED.setBrightness(ledBrightness);
+  FastLED.show();
+}
+
+void adjustPowerDraw()
+{
+  float currentCurrent = SensorReadings.aOut;
+  float targetCurrent = SensorReadings.aSol;
+  float batteryVoltage = SensorReadings.vBat;
+
+  /*
+   * Set powerValue based on:
+   * - Distance between battery voltage and target voltage
+   * - Distance between solar current and output current
+   */
+
+  float dfVoltage = batteryVoltage - TARGET_VOLTAGE;
+
+  // Turn off if we are below target voltage
+  if (dfVoltage < -0.1)
+  {
+    dfVoltage = 0;
+    powerValue = 0;
+    ledBrightness = MIN_BRIGHNESS;
+    currentStabilizerLoadValue = 0;
+    return;
+  }
+  else if (dfVoltage < 0)
+  {
+    // do nothing for now
+  }
+  else if (dfVoltage > 1.0)
+  {
+    dfVoltage = 1.0; // clip to max 1v diff
+  }
+
+  // Add dfVoltage to target current to match voltage
+  targetCurrent += dfVoltage * 2500; // 250mA per 0.1v diff from target
+
+
+  // Iteratively match solar current with output current
+  float dfCurrent = targetCurrent - currentCurrent;
+  if (dfCurrent < 0.0) // Reduce current
+  {
+    if (ledBrightness > MIN_BRIGHNESS)
+    {
+      if (dfCurrent < -50)
+      {
+        ledBrightness -= 10;
+      }
+      else
+      {
+        ledBrightness -= 1;
+      }
+
+      if (ledBrightness < MIN_BRIGHNESS) ledBrightness = MIN_BRIGHNESS;
+    }
+    else
+    {
+      if (dfCurrent < -30)
+      {
+        currentStabilizerLoadValue -= 255*4;
+      }
+      else
+      {
+        currentStabilizerLoadValue += dfCurrent*5; // + because negative current
+      }
+    }
+  }
+  else // Increase current
+  {
+    if (dfCurrent > 30)
+    {
+      currentStabilizerLoadValue += 255*4;
+    }
+    else
+    {
+      currentStabilizerLoadValue += dfCurrent*5;
+    }
+  }
+
+  if (currentStabilizerLoadValue < 0)
+  {
+    currentStabilizerLoadValue = 0;
+    digitalWrite(EN_VBAT, LOW);
+  }
+  else
+  {
+    digitalWrite(EN_VBAT, HIGH);
+  }
+
+  powerValue = currentStabilizerLoadValue;
+  //powerValue += dfVoltage * 5000;
+
+  // Clip to max value on all leds
+  // Adjust brightness
+  if (powerValue > NUM_LEDS*255)
+  {
+    powerValue = NUM_LEDS*255;
+    currentStabilizerLoadValue = powerValue;
+
+    if (dfCurrent > 50)
+    {
+      ledBrightness += 10;
+    }
+    else
+    {
+      ledBrightness += 1;
+    }
+
+    //ledBrightness += dfVoltage * 20;
+    
+    if (ledBrightness > 255)
+    {
+      ledBrightness = 255;
+    }
+  }
+  
+}
 
 void setupDisplay()
 {
@@ -163,6 +320,12 @@ void setup()
   ina_solar.begin();
   ina_output.begin();
   rf_driver.init();
+
+  FastLED.addLeds<LED_TYPE,DATA_PIN,COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.setBrightness(ledBrightness);
+  CRGB color = CRGB(10, 0, 0);
+  fill_solid(leds, NUM_LEDS, color);
+  FastLED.show();
 
   // Initialize sensor reading values
   SensorReadings.vBat = 0.0;
@@ -270,6 +433,7 @@ void manageDischargeOutputs()
   {
     digitalWrite(EN_VBAT, HIGH);
   }
+  /*
   else
   {
     // Enable discharge mode when above upper treshold
@@ -289,6 +453,7 @@ void manageDischargeOutputs()
       digitalWrite(EN_VBAT, LOW);
     }
   }
+  */
 
 
   //****
@@ -357,6 +522,8 @@ void readSensors()
 void loop()
 {
   readSensors();
+  adjustPowerDraw();
+  setLeds();
   updateDisplay();
   manageDischargeOutputs();
   sendValues();

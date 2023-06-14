@@ -20,7 +20,7 @@ from astral.sun import sun
 
 
 # How long in seconds to cache the data
-CACHE_TTL = 60*15
+CACHE_TTL = 60*5
 
 CSV_PATH = "/home/bart/Documents/Development/SolarDuino/pythonLogger/output/"
 
@@ -28,7 +28,7 @@ CSV_PATH = "/home/bart/Documents/Development/SolarDuino/pythonLogger/output/"
 COLUMNS_LIST = ["Date", "PV Voltage", "PV Current", "Battery Voltage", "Output Current", "LDO Voltage", "Flags"]
 
 # Interval for updating live view in seconds
-LIVE_VIEW_INTERVAL = 2
+LIVE_VIEW_INTERVAL = 1
 
 
 st.set_page_config(
@@ -75,6 +75,8 @@ def get_data() -> pd.DataFrame:
     # Calculate power
     df["PV Power"] = df["PV Voltage"] * (df["PV Current"]/1000)
     df["Output Power"] = df["Battery Voltage"] * (df["Output Current"]/1000)
+    df["Battery Current"] = df["PV Current"] - df["Output Current"]
+    df["Battery Power"] = df["Battery Voltage"] * (df["Battery Current"]/1000)
 
     # Drop rows with nan
     df.dropna(inplace=True)
@@ -107,6 +109,8 @@ def get_today_data() -> pd.DataFrame:
     # Calculate power
     df["PV Power"] = df["PV Voltage"] * (df["PV Current"]/1000)
     df["Output Power"] = df["Battery Voltage"] * (df["Output Current"]/1000)
+    df["Battery Current"] = df["PV Current"] - df["Output Current"]
+    df["Battery Power"] = df["Battery Voltage"] * (df["Battery Current"]/1000)
 
     # Drop rows with nan
     df.dropna(inplace=True)
@@ -115,7 +119,7 @@ def get_today_data() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=LIVE_VIEW_INTERVAL)
-def print_day_graphs(df, selected_day):
+def print_day_graphs(df, selected_day, show_entire_day):
     """
     Only show between dusk and dawn of selected day.
     """
@@ -125,10 +129,15 @@ def print_day_graphs(df, selected_day):
     dawn, dusk = get_dawn_dusk(get_location(), selected_day)
     
     # Get data of selected day only
-    df_selected_day = df[
-            (df.index >= dawn) &
-            (df.index <= dusk)
-        ].resample("30s").mean()
+    if show_entire_day:
+        df_selected_day = df[
+                (df.index.date == selected_day)
+            ].resample("30s").mean()
+    else:
+        df_selected_day = df[
+                (df.index >= dawn) &
+                (df.index <= dusk)
+            ].resample("30s").mean()
 
     # Somehow resample and mean can generate Nan rows
     #  so drop rows with nan
@@ -149,7 +158,7 @@ def print_day_graphs(df, selected_day):
             ["PV Voltage", "Battery Voltage", "LDO Voltage"],
         ).mark_line().encode(
             x=alt.X('Date:T', axis=alt.Axis(format='%b %d %H:%M', title='')),
-            y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " V"')),
+            y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " V"'), scale=alt.Scale(zero=False)),
             color=alt.Color('key:N',
                 scale=alt.Scale(domain=["PV Voltage", "Battery Voltage", "LDO Voltage"]),
                 legend=alt.Legend(
@@ -174,12 +183,12 @@ def print_day_graphs(df, selected_day):
     with tab_power:
         # Power
         fig = alt.Chart(df_selected_day.reset_index()).transform_fold(
-            ["PV Power", "Output Power"],
+            ["PV Power", "Output Power", "Battery Power"],
         ).mark_line().encode(
             x=alt.X('Date:T', axis=alt.Axis(format='%b %d %H:%M', title='')),
             y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " W"')),
             color=alt.Color('key:N',
-                scale=alt.Scale(domain=["PV Power", "Output Power"]),
+                scale=alt.Scale(domain=["PV Power", "Output Power", "Battery Power"]),
                 legend=alt.Legend(
                             title="",
                             orient="top",
@@ -202,12 +211,12 @@ def print_day_graphs(df, selected_day):
     with tab_current:
         # Current
         fig = alt.Chart(df_selected_day.reset_index()).transform_fold(
-            ["PV Current", "Output Current"],
+            ["PV Current", "Output Current", "Battery Current"],
         ).mark_line().encode(
             x=alt.X('Date:T', axis=alt.Axis(format='%b %d %H:%M', title='')),
             y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " mA"')),
             color=alt.Color('key:N',
-                scale=alt.Scale(domain=["PV Current", "Output Current"]),
+                scale=alt.Scale(domain=["PV Current", "Output Current", "Battery Current"]),
                 legend=alt.Legend(
                             title="",
                             orient="top",
@@ -239,13 +248,17 @@ def print_day_graphs(df, selected_day):
         df_selected_day["Output Energy"] = df_selected_day["Output Energy"].apply(lambda row : row.total_seconds() if not isinstance(row, int) else 0.0)
         df_selected_day["Output Energy"] = df_selected_day["Output Energy"] / 3600
 
+        df_selected_day["Battery Energy"] = (integrate.cumtrapz(df_selected_day["Battery Power"], df_selected_day.index, initial=0))
+        df_selected_day["Battery Energy"] = df_selected_day["Battery Energy"].apply(lambda row : row.total_seconds() if not isinstance(row, int) else 0.0)
+        df_selected_day["Battery Energy"] = df_selected_day["Battery Energy"] / 3600
+
         fig = alt.Chart(df_selected_day.reset_index()).transform_fold(
-            ["PV Energy", "Output Energy"],
+            ["PV Energy", "Output Energy", "Battery Energy"],
         ).mark_line().encode(
             x=alt.X('Date:T', axis=alt.Axis(format='%b %d %H:%M', title='')),
             y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " Wh"')),
             color=alt.Color('key:N',
-                scale=alt.Scale(domain=["PV Energy", "Output Energy"]),
+                scale=alt.Scale(domain=["PV Energy", "Output Energy", "Battery Energy"]),
                 legend=alt.Legend(
                             title="",
                             orient="top",
@@ -482,17 +495,18 @@ def start_live_view_loop(live_view):
                 # Energy metrics
                 col_pv_energy, col_output_energy = st.columns(2)
 
-                energy = np.trapz(df_today["PV Power"], df_today.index).total_seconds() / 3600
+                pv_energy = np.trapz(df_today["PV Power"], df_today.index).total_seconds() / 3600
+                output_energy = np.trapz(df_today["Output Power"], df_today.index).total_seconds() / 3600
 
                 col_pv_energy.metric(
                     label="Today's PV Energy",
-                    value="{:.3f} Wh".format(energy),
+                    value="{:.3f} Wh".format(pv_energy),
                     delta=None
                 )
 
                 col_output_energy.metric(
                     label="Today's Output Energy",
-                    value="{:.3f} Wh".format(0.0),
+                    value="{:.3f} Wh".format(output_energy),
                     delta=None
                 )
 
@@ -543,12 +557,12 @@ def start_live_view_loop(live_view):
                 with tab_power:
                     # Power
                     fig = alt.Chart(df_past_five_minutes.reset_index()).transform_fold(
-                        ["PV Power", "Output Power"],
+                        ["PV Power", "Output Power", "Battery Power"],
                     ).mark_line().encode(
                         x=alt.X('Date:T', axis=alt.Axis(format='%H:%M:%S', title='')),
                         y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " W"')),
                         color=alt.Color('key:N',
-                            scale=alt.Scale(domain=["PV Power", "Output Power"]),
+                            scale=alt.Scale(domain=["PV Power", "Output Power", "Battery Power"]),
                             legend=alt.Legend(
                                         title="",
                                         orient="top",
@@ -564,7 +578,7 @@ def start_live_view_loop(live_view):
                         ["PV Voltage", "Battery Voltage", "LDO Voltage"],
                     ).mark_line().encode(
                         x=alt.X('Date:T', axis=alt.Axis(format='%H:%M:%S', title='')),
-                        y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " V"')),
+                        y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " V"'), scale=alt.Scale(zero=False)),
                         color=alt.Color('key:N',
                             scale=alt.Scale(domain=["PV Voltage", "Battery Voltage", "LDO Voltage"]),
                             legend=alt.Legend(
@@ -578,12 +592,12 @@ def start_live_view_loop(live_view):
                 with tab_current:
                     # Current
                     fig = alt.Chart(df_past_five_minutes.reset_index()).transform_fold(
-                        ["PV Current", "Output Current"],
+                        ["PV Current", "Output Current", "Battery Current"],
                     ).mark_line().encode(
                         x=alt.X('Date:T', axis=alt.Axis(format='%H:%M:%S', title='')),
                         y=alt.Y('value:Q', axis=alt.Axis(title="", labelExpr='datum.value + " mA"')),
                         color=alt.Color('key:N',
-                            scale=alt.Scale(domain=["PV Current", "Output Current"]),
+                            scale=alt.Scale(domain=["PV Current", "Output Current", "Battery Current"]),
                             legend=alt.Legend(
                                         title="",
                                         orient="top",
@@ -602,6 +616,8 @@ def main():
 
     selected_day = st.date_input("Selected day")
 
+    show_entire_day = st.checkbox('Show entire day')
+
     # Set selected day to yesterday if today is selected and not yet dawn
     dawn, _ = get_dawn_dusk(get_location(), selected_day)
     current_datetime = datetime.now()
@@ -612,7 +628,7 @@ def main():
 
     df = get_data()
 
-    print_day_graphs(df, selected_day)
+    print_day_graphs(df, selected_day, show_entire_day)
     print_week_graphs(df, selected_day)
     print_year_graphs(df, selected_day)
 
